@@ -277,23 +277,34 @@ hardware_interface::return_type TopicBasedSystem::write(const rclcpp::Time& /*ti
   }
 
   sensor_msgs::msg::JointState joint_state;
+  joint_state.header.stamp = node_->now();
+  std::vector<int> position_index_by_joint(info_.joints.size(), -1);
+  std::vector<int> velocity_index_by_joint(info_.joints.size(), -1);
+  std::vector<int> effort_index_by_joint(info_.joints.size(), -1);
   for (std::size_t i = 0; i < info_.joints.size(); ++i)
   {
-    joint_state.name.push_back(info_.joints[i].name);
-    joint_state.header.stamp = node_->now();
+    bool included_joint_name = false;
     // only send commands to the interfaces that are defined for this joint
     for (const auto& interface : info_.joints[i].command_interfaces)
     {
+      if (!included_joint_name)
+      {
+        joint_state.name.push_back(info_.joints[i].name);
+        included_joint_name = true;
+      }
       if (interface.name == hardware_interface::HW_IF_POSITION)
       {
+        position_index_by_joint[i] = static_cast<int>(joint_state.position.size());
         joint_state.position.push_back(joint_commands_[POSITION_INTERFACE_INDEX][i]);
       }
       else if (interface.name == hardware_interface::HW_IF_VELOCITY)
       {
+        velocity_index_by_joint[i] = static_cast<int>(joint_state.velocity.size());
         joint_state.velocity.push_back(joint_commands_[VELOCITY_INTERFACE_INDEX][i]);
       }
       else if (interface.name == hardware_interface::HW_IF_EFFORT)
       {
+        effort_index_by_joint[i] = static_cast<int>(joint_state.effort.size());
         joint_state.effort.push_back(joint_commands_[EFFORT_INTERFACE_INDEX][i]);
       }
       else
@@ -310,18 +321,33 @@ hardware_interface::return_type TopicBasedSystem::write(const rclcpp::Time& /*ti
     {
       if (interface.name == hardware_interface::HW_IF_POSITION)
       {
-        joint_state.position[mimic_joint.joint_index] =
-            mimic_joint.multiplier * joint_state.position[mimic_joint.mimicked_joint_index];
+        if (position_index_by_joint[mimic_joint.joint_index] >= 0 &&
+            position_index_by_joint[mimic_joint.mimicked_joint_index] >= 0)
+        {
+          joint_state.position[static_cast<std::size_t>(position_index_by_joint[mimic_joint.joint_index])] =
+              mimic_joint.multiplier *
+              joint_state.position[static_cast<std::size_t>(position_index_by_joint[mimic_joint.mimicked_joint_index])];
+        }
       }
       else if (interface.name == hardware_interface::HW_IF_VELOCITY)
       {
-        joint_state.velocity[mimic_joint.joint_index] =
-            mimic_joint.multiplier * joint_state.velocity[mimic_joint.mimicked_joint_index];
+        if (velocity_index_by_joint[mimic_joint.joint_index] >= 0 &&
+            velocity_index_by_joint[mimic_joint.mimicked_joint_index] >= 0)
+        {
+          joint_state.velocity[static_cast<std::size_t>(velocity_index_by_joint[mimic_joint.joint_index])] =
+              mimic_joint.multiplier *
+              joint_state.velocity[static_cast<std::size_t>(velocity_index_by_joint[mimic_joint.mimicked_joint_index])];
+        }
       }
       else if (interface.name == hardware_interface::HW_IF_EFFORT)
       {
-        joint_state.effort[mimic_joint.joint_index] =
-            mimic_joint.multiplier * joint_state.effort[mimic_joint.mimicked_joint_index];
+        if (effort_index_by_joint[mimic_joint.joint_index] >= 0 &&
+            effort_index_by_joint[mimic_joint.mimicked_joint_index] >= 0)
+        {
+          joint_state.effort[static_cast<std::size_t>(effort_index_by_joint[mimic_joint.joint_index])] =
+              mimic_joint.multiplier *
+              joint_state.effort[static_cast<std::size_t>(effort_index_by_joint[mimic_joint.mimicked_joint_index])];
+        }
       }
     }
   }

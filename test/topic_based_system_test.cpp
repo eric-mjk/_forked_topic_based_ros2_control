@@ -27,6 +27,9 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include <cmath>
+#include <chrono>
+#include <thread>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -38,10 +41,15 @@
 #include <hardware_interface/version.h>
 #endif
 #include <hardware_interface/resource_manager.hpp>
+#include <hardware_interface/component_parser.hpp>
 #include <rclcpp/node.hpp>
+#include <rclcpp/executors/single_threaded_executor.hpp>
 #include <rclcpp/utilities.hpp>
 #include <rclcpp_lifecycle/state.hpp>
 #include <ros2_control_test_assets/descriptions.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
+
+#include <topic_based_ros2_control/topic_based_system.hpp>
 
 TEST(TestTopicBasedSystem, load_topic_based_system_2dof)
 {
@@ -78,6 +86,74 @@ TEST(TestTopicBasedSystem, load_topic_based_system_2dof)
 #else
   ASSERT_NO_THROW(hardware_interface::ResourceManager rm(urdf, true, false));
 #endif
+}
+
+TEST(TestTopicBasedSystem, write_omits_state_only_joints_from_command_message)
+{
+  const std::string hardware_system_with_passive_joint = R"(
+  <ros2_control name="TopicBasedSystemPassiveJoint" type="system">
+    <hardware>
+      <plugin>topic_based_ros2_control/TopicBasedSystem</plugin>
+      <param name="joint_commands_topic">/topic_based_joint_commands_regression</param>
+      <param name="joint_states_topic">/topic_based_custom_joint_states_regression</param>
+    </hardware>
+    <joint name="joint1">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="joint2">
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+)";
+
+  auto urdf = ros2_control_test_assets::urdf_head + hardware_system_with_passive_joint +
+              ros2_control_test_assets::urdf_tail;
+  const auto hardware_info = hardware_interface::parse_control_resources_from_urdf(urdf);
+  ASSERT_EQ(hardware_info.size(), 1u);
+
+  topic_based_ros2_control::TopicBasedSystem system;
+  ASSERT_EQ(system.on_init(hardware_info.front()), topic_based_ros2_control::CallbackReturn::SUCCESS);
+
+  auto command_interfaces = system.export_command_interfaces();
+  ASSERT_EQ(command_interfaces.size(), 1u);
+  command_interfaces.front().set_value(0.42);
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("topic_based_system_regression_subscriber");
+  std::optional<sensor_msgs::msg::JointState> received_joint_state;
+  const auto subscription = subscriber_node->create_subscription<sensor_msgs::msg::JointState>(
+      "/topic_based_joint_commands_regression", rclcpp::QoS(1),
+      [&received_joint_state](sensor_msgs::msg::JointState::SharedPtr msg) { received_joint_state = *msg; });
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(subscriber_node);
+
+  // Give discovery a short window before publishing.
+  const auto discovery_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (std::chrono::steady_clock::now() < discovery_deadline)
+  {
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  ASSERT_EQ(system.write(rclcpp::Time(0), rclcpp::Duration::from_seconds(0.01)),
+            hardware_interface::return_type::OK);
+
+  const auto receive_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!received_joint_state.has_value() && std::chrono::steady_clock::now() < receive_deadline)
+  {
+    executor.spin_some();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  ASSERT_TRUE(received_joint_state.has_value());
+  EXPECT_EQ(received_joint_state->name, std::vector<std::string>({ "joint1" }));
+  EXPECT_EQ(received_joint_state->position.size(), 1u);
+  EXPECT_NEAR(received_joint_state->position.front(), 0.42, 1e-9);
+  EXPECT_TRUE(received_joint_state->velocity.empty());
+  EXPECT_TRUE(received_joint_state->effort.empty());
 }
 
 int main(int argc, char** argv)
